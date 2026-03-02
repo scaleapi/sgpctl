@@ -1,0 +1,99 @@
+name: Publish Release
+run-name: "Publish ${{ github.event.release.tag_name }}"
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  homebrew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
+          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
+          repositories: |
+            sgpctl
+
+      - name: Validate release was created by build workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | sort)
+          for REQUIRED in sgpctl-darwin-arm64 sgpctl-linux-amd64 sgpctl-windows-amd64.exe sgp-commit.txt; do
+            if ! echo "$ASSETS" | grep -qx "$REQUIRED"; then
+              echo "::error::Release $TAG is missing required asset '$REQUIRED'. Releases must be created through the 'Create Release Tag' workflow."
+              exit 1
+            fi
+          done
+
+      - name: Checkout sgpctl repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download macOS binary from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release download "$TAG" --pattern "sgpctl-darwin-arm64" --dir artifacts
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+
+          # Compute SHA256 for the macOS binary
+          SHA_DARWIN_ARM64=$(sha256sum artifacts/sgpctl-darwin-arm64 | awk '{print $1}')
+
+          # Get the asset ID for the macOS binary
+          ASSET_ID=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[] | select(.name=="sgpctl-darwin-arm64") | .id')
+
+          # Update formula
+          sed -i "s|releases/assets/[0-9]*|releases/assets/${ASSET_ID}|" Formula/sgpctl.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/sgpctl.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${SHA_DARWIN_ARM64}\"/" Formula/sgpctl.rb
+
+          # Clean up stale branch/PR from prior attempts
+          BRANCH="auto/formula-v${VERSION}"
+          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add Formula/sgpctl.rb
+          git commit -m "formula: update sgpctl to ${VERSION}"
+          git push -u origin "$BRANCH" --force
+
+          # Create PR and merge using app token (bypasses auto-merge restriction)
+          gh pr create \
+            --title "formula: update sgpctl to ${VERSION}" \
+            --body "Automated Homebrew formula update for release v${VERSION}." \
+            --base main \
+            --head "$BRANCH"
+
+          gh pr merge "$BRANCH" --squash --admin
+
+      - name: Revert release to draft and clean up on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          BRANCH="auto/formula-v${VERSION}"
+          gh release edit "$TAG" --repo "${{ github.repository }}" --draft
+          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+          echo "::error::Homebrew update failed — release $TAG reverted to draft"

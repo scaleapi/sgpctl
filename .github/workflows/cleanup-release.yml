@@ -1,0 +1,31 @@
+name: Cleanup Deleted Release
+run-name: "Cleanup ${{ github.event.release.tag_name }}"
+
+on:
+  release:
+    types: [deleted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete tag and formula branch/PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          BRANCH="auto/formula-v${VERSION}"
+          REPO="${{ github.repository }}"
+
+          # Close any open formula PR and delete the branch
+          gh pr close "$BRANCH" --repo "$REPO" --delete-branch 2>/dev/null || true
+
+          # Delete the tag
+          gh api -X DELETE "repos/${REPO}/git/refs/tags/${TAG}" 2>/dev/null || true
+
+          echo "Cleaned up tag $TAG and branch $BRANCH"

@@ -1,0 +1,216 @@
+name: Create Draft Release
+run-name: "Draft release v${{ github.event.inputs.version }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
+          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format '$VERSION'. Must be semver (e.g. 1.2.3)"
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        run: |
+          TAG="v${{ github.event.inputs.version }}"
+          if git tag -l | grep -qx "$TAG"; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      - name: Check version is newer than latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          LATEST=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName // empty' 2>/dev/null || echo "")
+          LATEST="${LATEST#v}"
+
+          if [ -n "$LATEST" ]; then
+            # Compare versions using sort -V
+            HIGHER=$(printf '%s\n%s' "$LATEST" "$VERSION" | sort -V | tail -1)
+            if [ "$HIGHER" = "$LATEST" ]; then
+              echo "::error::Version $VERSION is not newer than latest release $LATEST"
+              exit 1
+            fi
+          fi
+
+          echo "Tagging v${VERSION} (latest: ${LATEST:-none})"
+
+      - name: Create and push tag
+        run: |
+          TAG="v${{ github.event.inputs.version }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  check:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.compare.outputs.should-build }}
+      sgp-commit: ${{ steps.sgp-sha.outputs.sha }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
+          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
+          repositories: |
+            sgp
+
+      - name: Checkout sgp repo (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: scaleapi/sgp
+          token: ${{ steps.app-token.outputs.token }}
+          sparse-checkout: services/sgpctl
+          sparse-checkout-cone-mode: true
+
+      - name: Get latest SGP commit for services/sgpctl
+        id: sgp-sha
+        run: |
+          echo "sha=$(git log -1 --format=%H -- services/sgpctl)" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with last release
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the sgp-commit.txt asset from the latest release
+          LAST_SHA=$(gh release view --repo "${{ github.repository }}" --json assets -q '.assets[] | select(.name=="sgp-commit.txt") | .url' 2>/dev/null | xargs -I{} curl -sL -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" {} 2>/dev/null || echo "")
+
+          CURRENT_SHA="${{ steps.sgp-sha.outputs.sha }}"
+          echo "Last release SGP commit: ${LAST_SHA:-none}"
+          echo "Current SGP commit:      $CURRENT_SHA"
+
+          if [ "$LAST_SHA" = "$CURRENT_SHA" ]; then
+            echo "No changes to services/sgpctl/ since last release — skipping build."
+            echo "should-build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected — proceeding with build."
+            echo "should-build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should-build == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact: sgpctl-linux-amd64
+          - runner: macos-latest
+            artifact: sgpctl-darwin-arm64
+          - runner: windows-latest
+            artifact: sgpctl-windows-amd64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
+          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
+          repositories: |
+            sgp
+
+      - name: Checkout sgp repo (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: scaleapi/sgp
+          token: ${{ steps.app-token.outputs.token }}
+          sparse-checkout: services/sgpctl
+          sparse-checkout-cone-mode: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install ./services/sgpctl
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name sgpctl services/sgpctl/sgpctl/cli.py
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mv dist/sgpctl.exe dist/${{ matrix.artifact }}
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv dist/sgpctl dist/${{ matrix.artifact }}
+
+      - name: Smoke test
+        run: |
+          ./dist/${{ matrix.artifact }} --help
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: [check, build]
+    if: needs.check.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Write SGP commit SHA
+        run: |
+          echo "${{ needs.check.outputs.sgp-commit }}" > artifacts/sgp-commit.txt
+
+      - name: Create draft release with assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ github.event.inputs.version }}"
+          REPO="${{ github.repository }}"
+
+          # Create a draft release
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --draft
+
+          # Upload sgp-commit.txt for future change detection
+          gh release upload "$TAG" artifacts/sgp-commit.txt --repo "$REPO"
+
+          # Upload all binaries
+          for dir in artifacts/*/; do
+            for file in "$dir"*; do
+              gh release upload "$TAG" "$file" --repo "$REPO"
+            done
+          done
