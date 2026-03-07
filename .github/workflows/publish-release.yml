@@ -57,11 +57,8 @@ jobs:
           # Compute SHA256 for the macOS binary
           SHA_DARWIN_ARM64=$(sha256sum artifacts/sgpctl-darwin-arm64 | awk '{print $1}')
 
-          # Get the asset ID for the macOS binary
-          ASSET_ID=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[] | select(.name=="sgpctl-darwin-arm64") | .id')
-
           # Update formula
-          sed -i "s|releases/assets/[0-9]*|releases/assets/${ASSET_ID}|" Formula/sgpctl.rb
+          sed -i "s|releases/download/v[^/]*/|releases/download/${TAG}/|" Formula/sgpctl.rb
           sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/sgpctl.rb
           sed -i "s/sha256 \".*\"/sha256 \"${SHA_DARWIN_ARM64}\"/" Formula/sgpctl.rb
 
