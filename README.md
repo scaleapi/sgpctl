@@ -6,25 +6,12 @@ A CLI tool for managing SGP services, including System Manager and Agentex Cloud
 
 ### macOS (Homebrew)
 
-Since this is a private repo, you need a GitHub personal access token with `repo` scope.
-
-Generate one via the CLI:
-
 ```bash
-gh auth token
-```
-
-Or create one manually at https://github.com/settings/tokens.
-
-Then install:
-
-```bash
-export HOMEBREW_GITHUB_API_TOKEN=$(gh auth token)
 brew tap scaleapi/sgpctl https://github.com/scaleapi/sgpctl
 brew install sgpctl
 ```
 
-You can add the `export` line to your `~/.zshrc` or `~/.bashrc` to persist it.
+The explicit URL is required because the tap repo isn't named `homebrew-sgpctl` (the Homebrew convention for auto-discovery). No GitHub token needed — this repo and its releases are public.
 
 To upgrade to the latest version:
 
