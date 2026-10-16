@@ -15,41 +15,24 @@ jobs:
   validate:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The version is free-form operator input. It is read from the environment,
+    # never expanded into script text, and checked before anything else runs.
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app-token
-        with:
-          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
-          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-tags: true
-          fetch-depth: 0
-
       - name: Validate version format
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Invalid version format '$VERSION'. Must be semver (e.g. 1.2.3)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Must be semver without a v prefix (e.g. 1.2.3)"
             exit 1
           fi
-
-      - name: Check tag does not already exist
-        run: |
-          TAG="v${{ github.event.inputs.version }}"
-          if git tag -l | grep -qx "$TAG"; then
-            echo "::error::Tag $TAG already exists"
-            exit 1
-          fi
+          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
 
       - name: Check version is newer than latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          LATEST=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName // empty' 2>/dev/null || echo "")
+          LATEST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName // empty' 2>/dev/null || echo "")
           LATEST="${LATEST#v}"
 
           if [ -n "$LATEST" ]; then
@@ -61,13 +44,42 @@ jobs:
             fi
           fi
 
-          echo "Tagging v${VERSION} (latest: ${LATEST:-none})"
+          echo "Tagging ${TAG} (latest: ${LATEST:-none})"
+
+      # Checked out with the default token and without persisting it; the tag
+      # push below authenticates with the App token from its own environment.
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag does not already exist
+        run: |
+          if git tag -l | grep -qx "$TAG"; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      # Scoped to this repository and to contents only, and minted only after
+      # the input has been validated.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.SGPCTL_SYNC_APP_ID }}
+          private-key: ${{ secrets.SGPCTL_SYNC_PRIVATE_KEY }}
+          repositories: |
+            sgpctl
+          permission-contents: write
 
       - name: Create and push tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          TAG="v${{ github.event.inputs.version }}"
+          # shellcheck disable=SC2016  # the variable must expand at push time, not here
+          helper='!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
           git tag "$TAG"
-          git push origin "$TAG"
+          git -c "credential.helper=${helper}" push origin "$TAG"
 
   check:
     needs: validate
@@ -91,6 +103,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           sparse-checkout: services/sgpctl
           sparse-checkout-cone-mode: true
+          persist-credentials: false
 
       - name: Get latest SGP commit for services/sgpctl
         id: sgp-sha
@@ -101,11 +114,11 @@ jobs:
         id: compare
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_SHA: ${{ steps.sgp-sha.outputs.sha }}
         run: |
           # Get the sgp-commit.txt asset from the latest release
-          LAST_SHA=$(gh release view --repo "${{ github.repository }}" --json assets -q '.assets[] | select(.name=="sgp-commit.txt") | .url' 2>/dev/null | xargs -I{} curl -sL -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" {} 2>/dev/null || echo "")
+          LAST_SHA=$(gh release view --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[] | select(.name=="sgp-commit.txt") | .url' 2>/dev/null | xargs -I{} curl -sL -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" {} 2>/dev/null || echo "")
 
-          CURRENT_SHA="${{ steps.sgp-sha.outputs.sha }}"
           echo "Last release SGP commit: ${LAST_SHA:-none}"
           echo "Current SGP commit:      $CURRENT_SHA"
 
@@ -158,6 +171,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           sparse-checkout: services/sgpctl
           sparse-checkout-cone-mode: true
+          persist-credentials: false
 
       # actions/setup-python doesn't work inside the manylinux container
       # (the container provides Python at /opt/python/*/bin instead). Use
@@ -235,15 +249,23 @@ jobs:
           path: artifacts
 
       - name: Write SGP commit SHA
+        env:
+          SGP_COMMIT: ${{ needs.check.outputs.sgp-commit }}
         run: |
-          echo "${{ needs.check.outputs.sgp-commit }}" > artifacts/sgp-commit.txt
+          echo "$SGP_COMMIT" > artifacts/sgp-commit.txt
 
       - name: Create draft release with assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
         run: |
-          TAG="v${{ github.event.inputs.version }}"
-          REPO="${{ github.repository }}"
+          # Re-checked here because this job runs in a fresh environment.
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          REPO="$GITHUB_REPOSITORY"
 
           # Create a draft release
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --draft
