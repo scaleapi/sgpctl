@@ -13,6 +13,79 @@ jobs:
   homebrew:
     runs-on: ubuntu-latest
     steps:
+      # The tag name is chosen by whoever created the release, and git allows
+      # shell metacharacters in it. It is handled exactly once, here: read from
+      # the environment instead of being expanded into the script text, and
+      # rejected unless it is a plain vX.Y.Z. Every later step uses the
+      # validated TAG / VERSION / BRANCH. Keep this step first and
+      # credential-free; GITHUB_ENV is only written after the check passes.
+      - name: Validate release tag
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag is not a vX.Y.Z version tag; refusing to publish it."
+            exit 1
+          fi
+          {
+            echo "TAG=${RAW_TAG}"
+            echo "VERSION=${RAW_TAG#v}"
+            echo "BRANCH=auto/formula-${RAW_TAG}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | sort)
+          for REQUIRED in sgpctl-darwin-arm64 sgpctl-linux-amd64 sgpctl-windows-amd64.exe sgp-commit.txt; do
+            if ! echo "$ASSETS" | grep -qx "$REQUIRED"; then
+              echo "::error::Release $TAG is missing required asset '$REQUIRED'. Releases must be created through the 'Create Draft Release' workflow."
+              exit 1
+            fi
+          done
+
+      # Checked out with the default GITHUB_TOKEN and without persisting it. The
+      # formula commit is created locally and pushed later with the App token
+      # supplied through that step's environment, so no credential is written
+      # into the workspace .git/config.
+      - name: Checkout sgpctl repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Download macOS binary from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "sgpctl-darwin-arm64" --dir artifacts
+
+      # No credential in this step; it is the only one that edits files. TAG
+      # and VERSION are limited to [v0-9.] by the validation above, so they
+      # cannot carry a sed delimiter or metacharacter. The greps fail the job
+      # if a substitution silently did not apply.
+      - name: Update Homebrew formula
+        run: |
+          SHA_DARWIN_ARM64=$(sha256sum artifacts/sgpctl-darwin-arm64 | awk '{print $1}')
+
+          sed -i "s|releases/download/v[^/]*/|releases/download/${TAG}/|" Formula/sgpctl.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/sgpctl.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${SHA_DARWIN_ARM64}\"/" Formula/sgpctl.rb
+
+          grep -qF "releases/download/${TAG}/" Formula/sgpctl.rb
+          grep -qF "version \"${VERSION}\"" Formula/sgpctl.rb
+          grep -qF "sha256 \"${SHA_DARWIN_ARM64}\"" Formula/sgpctl.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add Formula/sgpctl.rb
+          git commit -m "formula: update sgpctl to ${VERSION}"
+
+      # The App token is minted only now, after every untrusted value has been
+      # validated and the commit exists, and it lives only in the next step's
+      # environment. That step reads nothing from the release event.
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
@@ -21,62 +94,29 @@ jobs:
           repositories: |
             sgpctl
 
-      - name: Validate release was created by build workflow
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.release.tag_name }}"
-          ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | sort)
-          for REQUIRED in sgpctl-darwin-arm64 sgpctl-linux-amd64 sgpctl-windows-amd64.exe sgp-commit.txt; do
-            if ! echo "$ASSETS" | grep -qx "$REQUIRED"; then
-              echo "::error::Release $TAG is missing required asset '$REQUIRED'. Releases must be created through the 'Create Release Tag' workflow."
-              exit 1
-            fi
-          done
-
-      - name: Checkout sgpctl repo
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Download macOS binary from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.release.tag_name }}"
-          gh release download "$TAG" --pattern "sgpctl-darwin-arm64" --dir artifacts
-
-      - name: Update Homebrew formula
+      - name: Open and merge formula PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
+          # git authenticates with a one-off credential helper that reads
+          # GH_TOKEN from this step's environment at push time. The helper text
+          # names the variable, not its value, so the token is never written to
+          # disk or placed on a command line.
+          # shellcheck disable=SC2016  # the variable must expand at push time, not here
+          helper='!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
 
-          # Compute SHA256 for the macOS binary
-          SHA_DARWIN_ARM64=$(sha256sum artifacts/sgpctl-darwin-arm64 | awk '{print $1}')
-
-          # Update formula
-          sed -i "s|releases/download/v[^/]*/|releases/download/${TAG}/|" Formula/sgpctl.rb
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/sgpctl.rb
-          sed -i "s/sha256 \".*\"/sha256 \"${SHA_DARWIN_ARM64}\"/" Formula/sgpctl.rb
-
-          # Clean up stale branch/PR from prior attempts
-          BRANCH="auto/formula-v${VERSION}"
-          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
-          git push origin --delete "$BRANCH" 2>/dev/null || true
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add Formula/sgpctl.rb
-          git commit -m "formula: update sgpctl to ${VERSION}"
-          git push -u origin "$BRANCH" --force
+          # Clean up a stale PR/branch from a prior attempt. Close without
+          # --delete-branch: gh would also delete the local branch we are on,
+          # taking the formula commit with it. The remote branch is removed on
+          # the next line.
+          gh pr close "$BRANCH" 2>/dev/null || true
+          git -c "credential.helper=${helper}" push origin --delete "$BRANCH" 2>/dev/null || true
+          git -c "credential.helper=${helper}" push -u origin "$BRANCH" --force
 
           # Create PR and merge using app token (bypasses auto-merge restriction)
           gh pr create \
             --title "formula: update sgpctl to ${VERSION}" \
-            --body "Automated Homebrew formula update for release v${VERSION}." \
+            --body "Automated Homebrew formula update for release ${TAG}." \
             --base main \
             --head "$BRANCH"
 
@@ -87,10 +127,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          BRANCH="auto/formula-v${VERSION}"
-          gh release edit "$TAG" --repo "${{ github.repository }}" --draft
-          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
-          git push origin --delete "$BRANCH" 2>/dev/null || true
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::The release tag failed validation, so nothing was changed; inspect the release manually."
+            exit 0
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft
+          gh pr close "$BRANCH" 2>/dev/null || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" 2>/dev/null || true
           echo "::error::Homebrew update failed — release $TAG reverted to draft"
