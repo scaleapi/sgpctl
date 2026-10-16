@@ -105,8 +105,11 @@ jobs:
           # shellcheck disable=SC2016  # the variable must expand at push time, not here
           helper='!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
 
-          # Clean up stale branch/PR from prior attempts
-          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+          # Clean up a stale PR/branch from a prior attempt. Close without
+          # --delete-branch: gh would also delete the local branch we are on,
+          # taking the formula commit with it. The remote branch is removed on
+          # the next line.
+          gh pr close "$BRANCH" 2>/dev/null || true
           git -c "credential.helper=${helper}" push origin --delete "$BRANCH" 2>/dev/null || true
           git -c "credential.helper=${helper}" push -u origin "$BRANCH" --force
 
@@ -129,6 +132,6 @@ jobs:
             exit 0
           fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft
-          gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+          gh pr close "$BRANCH" 2>/dev/null || true
           gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" 2>/dev/null || true
           echo "::error::Homebrew update failed — release $TAG reverted to draft"
