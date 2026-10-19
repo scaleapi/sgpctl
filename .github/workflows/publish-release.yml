@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  attestations: read
 
 jobs:
   homebrew:
@@ -38,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | sort)
-          for REQUIRED in sgpctl-darwin-arm64 sgpctl-linux-amd64 sgpctl-windows-amd64.exe sgp-commit.txt; do
+          for REQUIRED in sgpctl-darwin-arm64 sgpctl-linux-amd64 sgpctl-windows-amd64.exe sgp-commit.txt SHA256SUMS; do
             if ! echo "$ASSETS" | grep -qx "$REQUIRED"; then
               echo "::error::Release $TAG is missing required asset '$REQUIRED'. Releases must be created through the 'Create Draft Release' workflow."
               exit 1
@@ -55,11 +56,29 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Download macOS binary from release
+      - name: Download release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "sgpctl-darwin-arm64" --dir artifacts
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "sgpctl-darwin-arm64" --pattern "SHA256SUMS" --dir artifacts
+
+      # Asset names prove nothing about where a file came from. Each asset the
+      # formula will point at must carry build provenance signed by this
+      # repository's draft-release workflow running on main, and the binary
+      # must be the one the build recorded in SHA256SUMS. A release assembled
+      # any other way stops here, before the formula is touched.
+      - name: Verify build provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for ASSET in sgpctl-darwin-arm64 SHA256SUMS; do
+            gh attestation verify "artifacts/${ASSET}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/draft-release.yml" \
+              --source-ref refs/heads/main
+          done
+          (cd artifacts && grep " sgpctl-darwin-arm64$" SHA256SUMS | sha256sum -c -)
 
       # No credential in this step; it is the only one that edits files. TAG
       # and VERSION are limited to [v0-9.] by the validation above, so they
