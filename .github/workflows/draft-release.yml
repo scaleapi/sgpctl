@@ -293,6 +293,19 @@ jobs:
         run: |
           echo "$SGP_COMMIT" > artifacts/sgp-commit.txt
 
+      # The tag this build is for, attested with the binaries, so publishing
+      # can tell assets built for this release from assets copied over from
+      # an older one.
+      - name: Write RELEASE_TAG
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format"
+            exit 1
+          fi
+          echo "v${VERSION}" > artifacts/RELEASE_TAG
+
       # One line per binary with a bare file name, so `sha256sum -c` works
       # from the directory the binaries are downloaded into.
       - name: Write SHA256SUMS
@@ -310,6 +323,7 @@ jobs:
           subject-path: |
             artifacts/*/sgpctl-*
             artifacts/SHA256SUMS
+            artifacts/RELEASE_TAG
 
       - name: Create draft release with assets
         env:
@@ -327,8 +341,9 @@ jobs:
           # Create a draft release
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --draft
 
-          # Upload sgp-commit.txt for future change detection, and the checksums
-          gh release upload "$TAG" artifacts/sgp-commit.txt artifacts/SHA256SUMS --repo "$REPO"
+          # Upload sgp-commit.txt for future change detection, the checksums,
+          # and the attested tag
+          gh release upload "$TAG" artifacts/sgp-commit.txt artifacts/SHA256SUMS artifacts/RELEASE_TAG --repo "$REPO"
 
           # Upload all binaries
           for dir in artifacts/*/; do
