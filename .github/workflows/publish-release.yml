@@ -112,15 +112,18 @@ jobs:
           gh pr close "$BRANCH" 2>/dev/null || true
           git -c "credential.helper=${helper}" push origin --delete "$BRANCH" 2>/dev/null || true
           git -c "credential.helper=${helper}" push -u origin "$BRANCH" --force
+          HEAD_SHA=$(git rev-parse HEAD)
 
-          # Create PR and merge using app token (bypasses auto-merge restriction)
+          # Create PR and merge using app token (bypasses auto-merge restriction).
+          # The merge is pinned to the commit this run pushed: if the branch head
+          # is anything else by the time we merge, fail instead of landing it.
           gh pr create \
             --title "formula: update sgpctl to ${VERSION}" \
             --body "Automated Homebrew formula update for release ${TAG}." \
             --base main \
             --head "$BRANCH"
 
-          gh pr merge "$BRANCH" --squash --admin
+          gh pr merge "$BRANCH" --squash --admin --match-head-commit "$HEAD_SHA"
 
       - name: Revert release to draft and clean up on failure
         if: failure()
