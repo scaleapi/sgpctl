@@ -112,9 +112,12 @@ jobs:
 
       # The binary reports the version from its package metadata, so the
       # release version has to be the one services/sgpctl/pyproject.toml
-      # declares. Bump it in scaleapi/sgp first, then release.
+      # declares. Bump it in scaleapi/sgp first, then release. validate has
+      # already pushed the tag by now, so a mismatch removes it again;
+      # otherwise the corrected re-run would stop at "tag already exists".
       - name: Check version matches services/sgpctl/pyproject.toml
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
         run: |
           cat > /tmp/pyproject_version.py <<'PYEOF'
@@ -125,6 +128,8 @@ jobs:
           PYPROJECT_VERSION=$(python3 -I /tmp/pyproject_version.py)
           if [ "$PYPROJECT_VERSION" != "$VERSION" ]; then
             echo "::error::Release version ${VERSION} does not match services/sgpctl/pyproject.toml version ${PYPROJECT_VERSION}. Bump pyproject.toml in scaleapi/sgp first."
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/v${VERSION}" \
+              || echo "::warning::Could not delete tag v${VERSION}; delete it before retrying."
             exit 1
           fi
 
@@ -133,6 +138,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_SHA: ${{ steps.sgp-sha.outputs.sha }}
+          VERSION: ${{ inputs.version }}
         run: |
           # Get the sgp-commit.txt asset from the latest release
           LAST_SHA=$(gh release view --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[] | select(.name=="sgp-commit.txt") | .url' 2>/dev/null | xargs -I{} curl -sL -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" {} 2>/dev/null || echo "")
@@ -142,6 +148,9 @@ jobs:
 
           if [ "$LAST_SHA" = "$CURRENT_SHA" ]; then
             echo "No changes to services/sgpctl/ since last release — skipping build."
+            # No release will be created, so do not leave the tag behind.
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/v${VERSION}" \
+              || echo "::warning::Could not delete tag v${VERSION}; delete it before retrying."
             echo "should-build=false" >> "$GITHUB_OUTPUT"
           else
             echo "Changes detected — proceeding with build."
@@ -186,10 +195,13 @@ jobs:
           repositories: |
             sgp
 
+      # Pinned to the commit the check job inspected, so the version that was
+      # verified is the version that gets built, whatever main does meanwhile.
       - name: Checkout sgp repo (sparse)
         uses: actions/checkout@v4
         with:
           repository: scaleapi/sgp
+          ref: ${{ needs.check.outputs.sgp-commit }}
           token: ${{ steps.app-token.outputs.token }}
           sparse-checkout: services/sgpctl
           sparse-checkout-cone-mode: true
