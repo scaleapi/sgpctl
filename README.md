@@ -34,12 +34,18 @@ bash install.sh
 
 ### Manual download
 
-Download the binary for your platform from the [latest release](https://github.com/scaleapi/sgpctl/releases/latest), verify it, and put it on your `PATH`:
+Download the binary for your platform and `SHA256SUMS` from the [same release](https://github.com/scaleapi/sgpctl/releases/latest). Save both in the same directory, then run the commands below from that directory to verify the binary and put it on your `PATH`:
 
 ```bash
-sha256sum -c --ignore-missing SHA256SUMS                 # shasum -a 256 -c on macOS
+# Linux:
+sha256sum -c --ignore-missing SHA256SUMS
 gh attestation verify sgpctl-linux-amd64 --repo scaleapi/sgpctl
 sudo install -m 0755 sgpctl-linux-amd64 /usr/local/bin/sgpctl
+
+# macOS:
+grep ' sgpctl-darwin-arm64$' SHA256SUMS | shasum -a 256 -c -
+gh attestation verify sgpctl-darwin-arm64 --repo scaleapi/sgpctl
+sudo install -o root -g wheel -m 0755 sgpctl-darwin-arm64 /usr/local/bin/sgpctl
 ```
 
 | Platform | Binary |
