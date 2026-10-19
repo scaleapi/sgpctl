@@ -16,11 +16,17 @@ jobs:
       - name: Delete tag and formula branch/PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          # The tag name is chosen by whoever created the release. It is read
+          # from the environment and only acted on when it is a plain vX.Y.Z.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::Deleted release tag is not a vX.Y.Z version tag; nothing to clean up."
+            exit 0
+          fi
           VERSION="${TAG#v}"
           BRANCH="auto/formula-v${VERSION}"
-          REPO="${{ github.repository }}"
+          REPO="$GITHUB_REPOSITORY"
 
           # Close any open formula PR and delete the branch
           gh pr close "$BRANCH" --repo "$REPO" --delete-branch 2>/dev/null || true
