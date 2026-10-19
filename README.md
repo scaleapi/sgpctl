@@ -20,9 +20,33 @@ brew update
 brew upgrade sgpctl
 ```
 
-### Linux / Windows
+### Linux / macOS (install script)
 
-Download the binary for your platform from the [latest release](https://github.com/scaleapi/sgpctl/releases/latest) and add it to your `PATH`.
+`install.sh` downloads the binary for your platform from the latest release, checks it against the release's `SHA256SUMS`, and installs it root-owned with mode 0755 into `/usr/local/bin` (using `sudo` if needed). Download it, read it, then run it:
+
+```bash
+curl -fsSL --proto '=https' -o install.sh https://raw.githubusercontent.com/scaleapi/sgpctl/main/install.sh
+less install.sh
+bash install.sh
+```
+
+`SGPCTL_VERSION=0.2.0` selects a release and `INSTALL_DIR=~/.local/bin` changes the destination.
+
+### Manual download
+
+Download the binary for your platform and `SHA256SUMS` from the [same release](https://github.com/scaleapi/sgpctl/releases/latest). Save both in the same directory, then run the commands below from that directory to verify the binary and put it on your `PATH`:
+
+```bash
+# Linux:
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify sgpctl-linux-amd64 --repo scaleapi/sgpctl
+sudo install -m 0755 sgpctl-linux-amd64 /usr/local/bin/sgpctl
+
+# macOS:
+grep ' sgpctl-darwin-arm64$' SHA256SUMS | shasum -a 256 -c -
+gh attestation verify sgpctl-darwin-arm64 --repo scaleapi/sgpctl
+sudo install -o root -g wheel -m 0755 sgpctl-darwin-arm64 /usr/local/bin/sgpctl
+```
 
 | Platform | Binary |
 |----------|--------|
